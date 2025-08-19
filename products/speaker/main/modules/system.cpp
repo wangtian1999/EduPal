@@ -83,9 +83,6 @@ static void update_battery_info(Speaker *speaker, const Settings *app_settings);
 // 全局闹钟激活标志（线程安全）
 #include <atomic>
 static std::atomic_bool alarm_active{false};
-// 闹钟消息框指针，触摸回调可访问以删除
-static lv_obj_t *alarm_screen = nullptr;
-static lv_obj_t *alarm_prev_screen = nullptr;
 
 bool system_init()
 {
@@ -503,13 +500,13 @@ bool system_init()
                 boost::thread([=]() {
                     // 循环播放，使用阻塞播放函数以保证连续性
                     while (alarm_active.load()) {
-                        audio_prompt_play_with_block("file://spiffs/boot.mp3", 3000);
+                        audio_prompt_play_with_block("file://spiffs/alarm.mp3", 3000);
                         // 小间隔，允许快速响应 stop
                         vTaskDelay(pdMS_TO_TICKS(100));
                     }
                 }).detach();
 
-                // 等待用户通过触摸按钮解除闹钟（触摸回调会处理停止与表情切换）
+                // 等待用户通过触摸按钮解除闹钟
                 printf("\033[1;33m[Alarm] 闹钟触发，正在播放 boot.mp3，等待用户触发退出。\033[0m\n");
             }).detach();
         } else {
@@ -726,24 +723,11 @@ static void touch_btn_event_cb(void *button_handle, void *usr_data)
         break;
     case BUTTON_SINGLE_CLICK:
         if (alarm_active) {
-            // 退出闹钟界面
+            // 退出闹钟
             alarm_active = false;
             ESP_UTILS_LOGI("Alarm dismissed by touch.");
             // Stop any playing prompt (boot/alert)
             audio_prompt_stop();
-
-            // 恢复之前的屏幕并删除 alarm screen
-            if (alarm_screen) {
-                bsp_display_lock(0);
-                // 恢复之前屏幕
-                if (alarm_prev_screen) {
-                    lv_scr_load(alarm_prev_screen);
-                    alarm_prev_screen = nullptr;
-                }
-                lv_obj_del(alarm_screen);
-                alarm_screen = nullptr;
-                bsp_display_unlock();
-            }
 
         } else if (_agent->isChatState(Agent::ChatState::ChatStateSlept)) {
             ESP_UTILS_LOGI("Chat Wake up");
