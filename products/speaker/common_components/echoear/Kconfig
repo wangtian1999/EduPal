@@ -1,7 +1,7 @@
 menu "Board Support Package(EchoEar)"
     choice BSP_PCB_VERSION
         prompt "PCB version"
-        default BSP_PCB_VERSION_V1_2
+        default BSP_PCB_VERSION_V1_0
 
         config BSP_PCB_VERSION_V1_0
             bool "V1.0"

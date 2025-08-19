@@ -31,6 +31,7 @@
 #include "battery_monitor.h"
 #include "imu_gesture.h"
 #include "touch_sensor.h"
+// audio prompt control
 
 constexpr const char *FUNCTION_OPEN_APP_THREAD_NAME               = "open_app";
 constexpr int         FUNCTION_OPEN_APP_THREAD_STACK_SIZE         = 10 * 1024;
@@ -78,6 +79,13 @@ static void touch_btn_event_cb(void *button_handle, void *usr_data);
 static void touch_sensor_switch();
 static void show_low_power(Speaker *speaker);
 static void update_battery_info(Speaker *speaker, const Settings *app_settings);
+
+// 全局闹钟激活标志（线程安全）
+#include <atomic>
+static std::atomic_bool alarm_active{false};
+// 闹钟消息框指针，触摸回调可访问以删除
+static lv_obj_t *alarm_screen = nullptr;
+static lv_obj_t *alarm_prev_screen = nullptr;
 
 bool system_init()
 {
@@ -377,6 +385,7 @@ bool system_init()
 
         for (const auto &param : params) {
             if (param.name() == "level") {
+                ESP_UTILS_LOGI("[Debug] set_volume received level: %s", param.string().c_str());
                 StorageNVS::Value value;
                 ESP_UTILS_CHECK_FALSE_EXIT(
                     StorageNVS::requestInstance().getLocalParam(SETTINGS_NVS_KEY_VOLUME, value),
@@ -458,6 +467,60 @@ bool system_init()
         .stack_in_ext = FUNCTION_BRIGHTNESS_CHANGE_THREAD_STACK_CAPS_EXT,
     }));
     FunctionDefinitionList::requestInstance().addFunction(setBrightness);
+
+    // 技能5：设置闹钟
+    // 描述：当用户提出设置闹钟的需求时，判断用户输入的时间（秒）是否为正整数，
+    // 若为正整数，则直接设置闹钟；否则提示用户输入有效的时间。
+    // 参数：seconde_from_now（多少秒后提醒）
+    FunctionDefinition setAlarm("set_alarm", "设置一个闹钟，在指定时间后提醒");
+    setAlarm.addParameter("seconde_from_now", "闹钟多少秒以后响（正整数，单位秒）", FunctionParameter::ValueType::String);
+    setAlarm.setCallback([=](const std::vector<FunctionParameter> &params) {
+        ESP_UTILS_LOG_TRACE_GUARD();
+
+        int seconde_from_now = 0;
+        for (const auto &param : params) {
+            if (param.name() == "seconde_from_now") {
+                ESP_UTILS_LOGI("[Debug] set_alarm received seconde_from_now: %s", param.string().c_str());
+                seconde_from_now = atoi(param.string().c_str());
+            }
+        }
+        if (seconde_from_now > 0) {
+            // 黄色字体打印
+            printf("\033[1;33m[Alarm] 正在为您设置闹钟，%d秒后提醒。\033[0m\n", seconde_from_now);
+            alarm_active.store(true);
+
+            // 定时器线程（非阻塞）
+            boost::thread([=]() {
+                vTaskDelay(pdMS_TO_TICKS(seconde_from_now * 1000));
+
+                // 如果在等待期间被取消，则不触发闹钟
+                if (!alarm_active.load()) {
+                    return;
+                }
+
+
+                // 启动音频循环线程，持续播放 boot.mp3，直到 alarm_active 被置为 false
+                boost::thread([=]() {
+                    // 循环播放，使用阻塞播放函数以保证连续性
+                    while (alarm_active.load()) {
+                        audio_prompt_play_with_block("file://spiffs/boot.mp3", 3000);
+                        // 小间隔，允许快速响应 stop
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+                }).detach();
+
+                // 等待用户通过触摸按钮解除闹钟（触摸回调会处理停止与表情切换）
+                printf("\033[1;33m[Alarm] 闹钟触发，正在播放 boot.mp3，等待用户触发退出。\033[0m\n");
+            }).detach();
+        } else {
+            ESP_UTILS_LOGW("闹钟时间参数无效，请输入正整数秒数。");
+        }
+    }, std::make_optional<FunctionDefinition::CallbackThreadConfig>(FunctionDefinition::CallbackThreadConfig{
+        .name = "set_alarm",
+        .stack_size = 4096,
+        .stack_in_ext = true,
+    }));
+    FunctionDefinitionList::requestInstance().addFunction(setAlarm);
 
     auto &storage_service = StorageNVS::requestInstance();
     storage_service.connectEventSignal([](const StorageNVS::Event & event) {
@@ -662,7 +725,27 @@ static void touch_btn_event_cb(void *button_handle, void *usr_data)
         bsp_head_led_brightness_set(last_brightness);
         break;
     case BUTTON_SINGLE_CLICK:
-        if (_agent->isChatState(Agent::ChatState::ChatStateSlept)) {
+        if (alarm_active) {
+            // 退出闹钟界面
+            alarm_active = false;
+            ESP_UTILS_LOGI("Alarm dismissed by touch.");
+            // Stop any playing prompt (boot/alert)
+            audio_prompt_stop();
+
+            // 恢复之前的屏幕并删除 alarm screen
+            if (alarm_screen) {
+                bsp_display_lock(0);
+                // 恢复之前屏幕
+                if (alarm_prev_screen) {
+                    lv_scr_load(alarm_prev_screen);
+                    alarm_prev_screen = nullptr;
+                }
+                lv_obj_del(alarm_screen);
+                alarm_screen = nullptr;
+                bsp_display_unlock();
+            }
+
+        } else if (_agent->isChatState(Agent::ChatState::ChatStateSlept)) {
             ESP_UTILS_LOGI("Chat Wake up");
             coze_chat_response_signal();
             ESP_UTILS_CHECK_FALSE_EXIT(_agent->sendChatEvent(Agent::ChatEvent::WakeUp), "Send chat event sleep failed");
