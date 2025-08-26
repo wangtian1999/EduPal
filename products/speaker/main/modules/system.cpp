@@ -18,6 +18,7 @@
 #include "esp_brookesia_app_calculator.hpp"
 #include "esp_brookesia_app_timer.hpp"
 #include "esp_brookesia_app_pos.hpp"
+#include "esp_brookesia_app_english_learning.hpp"
 #ifdef ESP_UTILS_LOG_TAG
 #   undef ESP_UTILS_LOG_TAG
 #endif
@@ -261,6 +262,12 @@ bool system_init()
     auto app_pos_id = speaker->installApp(app_pos);
     ESP_UTILS_CHECK_FALSE_RETURN(speaker->checkAppID_Valid(app_pos_id), false, "Install pos app failed");
 
+    /* Install English learning app */
+    auto app_english_learning = English_Learning::requestInstance();
+    ESP_UTILS_CHECK_NULL_RETURN(app_english_learning, false, "Get English learning app failed");
+    auto app_english_learning_id = speaker->installApp(app_english_learning);
+    ESP_UTILS_CHECK_FALSE_RETURN(speaker->checkAppID_Valid(app_english_learning_id), false, "Install English learning app failed");
+
     /* Init quick settings info */
     speaker->display.getQuickSettings().connectEventSignal([ = ](QuickSettings::EventData event_data) {
         ESP_UTILS_LOG_TRACE_GUARD();
@@ -319,7 +326,8 @@ bool system_init()
             {app_calculator_id, {app_calculator->getName(), "calculator", "calc", "计算器", "计算器应用", "计算器app"}},
             {app_ai_profile_id, {app_ai_profile->getName(), "AI profile", "ai 配置", "ai配置", "ai设置", "ai设置应用", "ai设置app"}},
             {app_timer_id, {app_timer->getName(), "timer", "时钟", "时钟应用", "时钟app"}},
-            {app_pos_id, {app_pos->getName(), "POS", "POS应用", "POSapp"}}
+            {app_pos_id, {app_pos->getName(), "POS", "POS应用", "POSapp"}},
+            {app_english_learning_id, {app_english_learning->getName(), "english", "english learning", "英语", "英语学习", "英语学习应用", "英语学习app", "学英语"}}
         };
 
         for (const auto &param : params) {

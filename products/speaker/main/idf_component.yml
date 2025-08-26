@@ -47,3 +47,6 @@ dependencies:
 
   brookesia_app_pos:
     override_path: "../../../apps/brookesia_app_pos"
+
+  brookesia_app_english_learning:
+    override_path: "../../../apps/brookesia_app_english_learning"
