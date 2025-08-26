@@ -82,6 +82,15 @@ bool Expression::del()
 
     std::lock_guard lock(_mutex);
 
+    // Clean up emoji timer if it exists
+    if (timer != nullptr) {
+        ESP_UTILS_LOGI("Cleaning up emoji timer during del()");
+        if (xTimerDelete(timer, portMAX_DELAY) != pdPASS) {
+            ESP_UTILS_LOGW("Failed to delete emoji timer");
+        }
+        timer = nullptr;
+    }
+
     _flags = {};
     _emotion_player = nullptr;
     _icon_player = nullptr;
@@ -103,6 +112,15 @@ bool Expression::pause()
     if (_flags.is_paused) {
         ESP_UTILS_LOGW("Already paused");
         return true;
+    }
+
+    // Clean up emoji timer when pausing
+    if (timer != nullptr) {
+        ESP_UTILS_LOGI("Cleaning up emoji timer during pause()");
+        if (xTimerDelete(timer, portMAX_DELAY) != pdPASS) {
+            ESP_UTILS_LOGW("Failed to delete emoji timer during pause");
+        }
+        timer = nullptr;
     }
 
     if (_emotion_player != nullptr) {

@@ -376,6 +376,8 @@ bool AI_Buddy::begin(const AI_BuddyData &data)
     return true;
 }
 
+#if 0
+// Original resume() implementation before modifications
 bool AI_Buddy::resume()
 {
     ESP_UTILS_LOG_TRACE_GUARD_WITH_THIS();
@@ -395,6 +397,65 @@ bool AI_Buddy::resume()
         ESP_UTILS_CHECK_FALSE_RETURN(_agent->resume(), false, "Agent resume failed");
         stopAudio(AudioType::MicOff);
         sendAudioEvent({AudioType::MicOn});
+        if (!_agent->hasChatState(Agent::_ChatStateSleep)) {
+            ESP_UTILS_CHECK_FALSE_RETURN(
+                _agent->sendChatEvent(Agent::ChatEvent::Sleep), false, "Send chat event sleep failed"
+            );
+        } else {
+            sendAudioEvent({AudioType::WakeUp});
+        }
+    }
+
+    ESP_UTILS_CHECK_FALSE_RETURN(expression.resume(!is_chat_started, !is_chat_started), false, "Expression resume failed");
+    if (is_chat_started) {
+        ESP_UTILS_CHECK_FALSE_RETURN(
+            expression.setEmoji("sleepy", {.repeat = false, .keep_when_stop = true}, {.repeat = true}),
+            false, "Set emoji failed"
+        );
+    }
+
+    return true;
+}
+#endif
+
+bool AI_Buddy::resume()
+{
+    ESP_UTILS_LOG_TRACE_GUARD_WITH_THIS();
+
+    std::lock_guard lock(_mutex);
+
+    ESP_UTILS_CHECK_FALSE_RETURN(_flags.is_begun, false, "Not begun");
+    
+    bool was_paused = _flags.is_pause;
+    bool is_chat_started = _agent->hasChatState(Agent::ChatStateStarted);
+    
+    if (!_flags.is_pause) {
+        ESP_UTILS_LOGD("AI_Buddy not paused, ensuring expression state consistency");
+        // Even if AI_Buddy is not paused, we still need to ensure Expression is resumed
+        // and properly synchronized with chat state
+        ESP_UTILS_CHECK_FALSE_RETURN(expression.resume(!is_chat_started, !is_chat_started), false, "Expression resume failed");
+        
+        // Only set sleepy emoji if chat is actually started and we're in a valid state
+        if (is_chat_started) {
+            ESP_UTILS_CHECK_FALSE_RETURN(
+                expression.setEmoji("sleepy", {.repeat = false, .keep_when_stop = true}, {.repeat = true}),
+                false, "Set emoji failed"
+            );
+            ESP_UTILS_LOGD("Set sleepy emoji for active chat session");
+        } else {
+            ESP_UTILS_LOGD("Chat not started, keeping current expression");
+        }
+        return true;
+    }
+
+    ESP_UTILS_LOGI("Resuming AI_Buddy from paused state");
+    _flags.is_pause = false;
+
+    if (is_chat_started) {
+        ESP_UTILS_CHECK_FALSE_RETURN(_agent->resume(), false, "Agent resume failed");
+        stopAudio(AudioType::MicOff);
+        sendAudioEvent({AudioType::MicOn});
+
         if (!_agent->hasChatState(Agent::_ChatStateSleep)) {
             ESP_UTILS_CHECK_FALSE_RETURN(
                 _agent->sendChatEvent(Agent::ChatEvent::Sleep), false, "Send chat event sleep failed"
