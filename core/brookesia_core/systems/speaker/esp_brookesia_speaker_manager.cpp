@@ -108,10 +108,28 @@ bool Manager::begin(void)
         auto manager = static_cast<Manager *>(lv_event_get_user_data(event));
         ESP_UTILS_CHECK_NULL_EXIT(manager, "Invalid manager");
 
-        ESP_UTILS_CHECK_FALSE_EXIT(
-            manager->processDisplayScreenChange(ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAIN, nullptr),
-            "Process screen change failed"
-        );
+        // Check if currently in APP_AI mode
+        if (manager->_display_active_screen == ESP_BROOKESIA_SPEAKER_SCREEN_APP_AI) {
+            ESP_UTILS_LOGI("Long press detected in APP_AI mode, calling app back() method");
+            // Get the current active app and call its back() method
+            auto active_app = static_cast<App*>(manager->getActiveApp());
+            if (active_app != nullptr) {
+                ESP_UTILS_LOGI("Calling back() method for active app");
+                active_app->back();
+            } else {
+                ESP_UTILS_LOGW("No active app found in APP_AI mode, switching to main screen");
+                ESP_UTILS_CHECK_FALSE_EXIT(
+                    manager->processDisplayScreenChange(ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAIN, nullptr),
+                    "Process screen change failed"
+                );
+            }
+        } else {
+            ESP_UTILS_LOGI("Long press detected, switching to main screen");
+            ESP_UTILS_CHECK_FALSE_EXIT(
+                manager->processDisplayScreenChange(ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAIN, nullptr),
+                "Process screen change failed"
+            );
+        }
     }, LV_EVENT_LONG_PRESSED, this);
     _draw_dummy_timer = std::make_unique<LvTimer>([this](void *) {
         ESP_UTILS_CHECK_FALSE_EXIT(
@@ -401,7 +419,14 @@ bool Manager::processAppRunExtra(ESP_Brookesia_CoreApp *app)
     App *speaker_app = static_cast<App *>(app);
 
     ESP_UTILS_CHECK_NULL_RETURN(speaker_app, false, "Invalid speaker app");
-
+    
+    // Check if already in APP_AI mode - if so, don't override it
+    if (_display_active_screen == ESP_BROOKESIA_SPEAKER_SCREEN_APP_AI) {
+        ESP_UTILS_LOGI("App run extra: already in APP_AI mode for app_id(%d), keeping current screen", speaker_app->getId());
+        ESP_UTILS_LOG_TRACE_EXIT_WITH_THIS();
+        return true;
+    }
+    
     ESP_UTILS_CHECK_FALSE_RETURN(processDisplayScreenChange(ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_APP, speaker_app), false,
                                  "Process screen change failed");
 
@@ -448,6 +473,19 @@ bool Manager::processDisplayScreenChange(ManagerScreen screen, void *param)
 {
     ESP_UTILS_LOG_TRACE_ENTER_WITH_THIS();
     ESP_UTILS_LOGD("Param: screen(%d), param(%p)", screen, param);
+    
+    // 添加详细的模式切换日志
+    const char* screen_names[] = {
+        "MAIN", "APP", "APP_AI", "DRAW_DUMMY", "UNKNOWN"
+    };
+    const char* current_screen_name = (_display_active_screen < ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAX) ? 
+                                      screen_names[_display_active_screen] : "INVALID";
+    const char* target_screen_name = (screen < ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAX) ? 
+                                     screen_names[screen] : "INVALID";
+    
+    ESP_UTILS_LOGI("Screen change: %s(%d) -> %s(%d)", 
+                   current_screen_name, _display_active_screen, 
+                   target_screen_name, screen);
 
     ESP_UTILS_CHECK_FALSE_RETURN(checkInitialized(), false, "Not initialized");
     ESP_UTILS_CHECK_FALSE_RETURN(screen < ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAX, false, "Invalid screen");
@@ -464,10 +502,21 @@ bool Manager::processDisplayScreenChange(ManagerScreen screen, void *param)
         _ai_buddy->pause();
         ESP_UTILS_CHECK_FALSE_RETURN(display.processDummyDraw(false), false, "Display load ai_buddy failed");
     }
+    
+    // For APP_AI mode switching to MAIN, pause AI_Buddy to hide expression UI
+    // Let the timer handle AI resume and expression restoration
+    if ((screen == ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAIN) &&
+            (_display_active_screen == ESP_BROOKESIA_SPEAKER_SCREEN_APP_AI)) {
+        ESP_UTILS_LOGI("Pausing AI_Buddy when switching from APP_AI to MAIN mode - hiding expression UI");
+        _ai_buddy->pause();
+        ESP_UTILS_CHECK_FALSE_RETURN(display.processDummyDraw(false), false, "Display load ai_buddy failed");
+        ESP_UTILS_LOGI("AI_Buddy paused, expression UI hidden. Timer will handle resume.");
+    }
 
     switch (screen) {
     case ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_MAIN:
         ESP_UTILS_CHECK_FALSE_RETURN(display.processMainScreenLoad(), false, "Display load main screen failed");
+        display.getDummyDrawMask()->moveBackground();
         if (_draw_dummy_timer != nullptr) {
             ESP_UTILS_CHECK_FALSE_RETURN(_draw_dummy_timer->restart(), false, "Restart ai_buddy resume timer failed");
         }
@@ -482,11 +531,57 @@ bool Manager::processDisplayScreenChange(ManagerScreen screen, void *param)
             );
         }
         break;
+    case ESP_BROOKESIA_SPEAKER_SCREEN_APP_AI:
+        ESP_UTILS_LOGI("Processing APP_AI screen setup - Keep AI_Buddy active while showing app interface");
+        // APP_AI mode: Keep AI_Buddy active while showing app interface
+        ESP_UTILS_CHECK_FALSE_RETURN(display.processDummyDraw(true), false, "Display load ai_buddy failed");
+        if (_draw_dummy_timer != nullptr) {
+            ESP_UTILS_LOGI("Pausing AI buddy resume timer for APP_AI screen");
+            ESP_UTILS_CHECK_FALSE_RETURN(_draw_dummy_timer->pause(), false, "Pause ai_buddy resume timer failed");
+        }
+        if (display.getQuickSettings().isVisible()) {
+            ESP_UTILS_LOGI("Moving quick settings to top for APP_AI screen");
+            ESP_UTILS_CHECK_FALSE_RETURN(
+                processQuickSettingsMoveTop(), false, "Process quick settings move top failed"
+            );
+        }
+        // Ensure AI_Buddy is active in APP_AI mode
+        if (_ai_buddy->isPause()) {
+            ESP_UTILS_LOGI("Resuming AI_Buddy for APP_AI mode");
+            _ai_buddy->resume();
+        }
+        // Ensure DummyDrawMask is on top after app UI is loaded
+        ESP_UTILS_LOGI("Moving DummyDrawMask to foreground for APP_AI mode");
+        display.getDummyDrawMask()->moveForeground();
+        ESP_UTILS_LOGI("APP_AI screen setup completed");
+        break;
     case ESP_BROOKESIA_SPEAKER_MANAGER_SCREEN_DRAW_DUMMY:
+#if 0
+        // Original code before modifications
         ESP_UTILS_CHECK_FALSE_RETURN(display.processDummyDraw(true), false, "Display load ai_buddy failed");
         if (_ai_buddy->isPause()) {
             _ai_buddy->resume();
         }
+        if (_draw_dummy_timer != nullptr) {
+            ESP_UTILS_CHECK_FALSE_RETURN(_draw_dummy_timer->pause(), false, "Pause ai_buddy resume timer failed");
+        }
+#endif
+        ESP_UTILS_LOGI("Processing DRAW_DUMMY screen setup");
+        ESP_UTILS_CHECK_FALSE_RETURN(display.processDummyDraw(true), false, "Display load ai_buddy failed");
+        
+        // Enhanced AI_Buddy resume logic with proper synchronization
+        if (_ai_buddy->isPause()) {
+            ESP_UTILS_LOGI("Resuming AI_Buddy for DRAW_DUMMY mode with enhanced synchronization");
+            if (!_ai_buddy->resume()) {
+                ESP_UTILS_LOGW("Failed to resume AI_Buddy for DRAW_DUMMY mode");
+            } else {
+                // Add delay to ensure AI_Buddy and expression system are fully synchronized
+                ESP_UTILS_LOGI("AI_Buddy resumed successfully for DRAW_DUMMY mode");
+            }
+        } else {
+            ESP_UTILS_LOGD("AI_Buddy already active, ensuring expression state consistency");
+        }
+        
         if (_draw_dummy_timer != nullptr) {
             ESP_UTILS_CHECK_FALSE_RETURN(_draw_dummy_timer->pause(), false, "Pause ai_buddy resume timer failed");
         }
@@ -638,6 +733,22 @@ bool Manager::processGestureScreenChange(ManagerScreen screen, void *param)
         _flags.enable_gesture_show_mask_bottom_edge = _flags.enable_gesture_navigation;
         _flags.enable_gesture_show_left_right_indicator_bar = _flags.enable_gesture_show_mask_left_right_edge;
         _flags.enable_gesture_show_bottom_indicator_bar = _flags.enable_gesture_show_mask_bottom_edge;
+        break;
+    case ESP_BROOKESIA_SPEAKER_SCREEN_APP_AI:
+        ESP_UTILS_LOGD("Processing APP_AI gesture screen setup");
+        ESP_UTILS_CHECK_NULL_RETURN(param, false, "Invalid param");
+        app_data = &((App *)param)->getActiveData();
+        // APP_AI mode uses same gesture settings as APP mode but with AI-specific optimizations
+        _flags.enable_gesture_navigation = app_data->flags.enable_navigation_gesture;
+        _flags.enable_gesture_navigation_back = (_flags.enable_gesture_navigation &&
+                                                data.flags.enable_gesture_navigation_back);
+        _flags.enable_gesture_navigation_home = _flags.enable_gesture_navigation;
+        _flags.enable_gesture_navigation_recents_app = _flags.enable_gesture_navigation_home;
+        _flags.enable_gesture_show_mask_left_right_edge = _flags.enable_gesture_navigation;
+        _flags.enable_gesture_show_mask_bottom_edge = _flags.enable_gesture_navigation;
+        _flags.enable_gesture_show_left_right_indicator_bar = _flags.enable_gesture_show_mask_left_right_edge;
+        _flags.enable_gesture_show_bottom_indicator_bar = _flags.enable_gesture_show_mask_bottom_edge;
+        ESP_UTILS_LOGD("APP_AI gesture screen setup completed");
         break;
     default:
         ESP_UTILS_CHECK_FALSE_RETURN(false, false, "Invalid screen");
